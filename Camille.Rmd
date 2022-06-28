@@ -9,22 +9,36 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## R Markdown
+## Tick data
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+```{r}
+# Load libraries
+library(tidyverse)
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r cars}
-summary(cars)
+# Read in data
+ticks <- readr::read_csv("https://data.ecoforecast.org/targets/ticks/ticks-targets.csv.gz", guess_max = 1e6)
 ```
 
-## Including Plots
+## Make a plot
 
-You can also embed plots, for example:
+```{r}
+# Plot tick data
+ggplot2::ggplot(data = ticks, mapping = aes(x = time, y = amblyomma_americanum, color = siteID)) +
+  ggplot2::geom_point() +
+  ggplot2::scale_colour_viridis_d() +
+  theme_bw() +
+  theme(axis.text = element_text(size = 14),
+        axis.title = element_text(size = 18))
 
-```{r pressure, echo=FALSE}
-plot(pressure)
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+```{r}
+# Plot tick data
+ggplot2::ggplot(data = ticks, mapping = aes(x = mmwrWeek, y = amblyomma_americanum)) +
+  ggplot2::geom_point() +
+  facet_wrap(~siteID) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 14),
+        axis.title = element_text(size = 18))
+```
+
