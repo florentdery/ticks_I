@@ -87,13 +87,18 @@ data <- list(y=log(amblyomma_americanum + 0.001),n = length(amblyomma_americanum
              )
 
 j.model   <- jags.model(file = textConnection(RandomWalk),
-                        data = data)
+                        data = data,
+                        n.chains = 3)
 
 ## burn-in
 jags.out   <- coda.samples (model = j.model,
                             variable.names = c("tau_add","tau_obs"),
-                                n.iter = 10000)
+                            n.iter = 10000)
 plot(jags.out)
+
+gelman.diag(jags.out)
+
+BGR <- gelman.plot(jags.out)
 ```
 
 
