@@ -1,0 +1,146 @@
+---
+title: "tick_code"
+author: "sbsambado"
+date: "6/28/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(dplyr)
+library(ggplot2)
+library(rjags)
+
+```
+
+```{r}
+# tick data
+amblyomma <- readr::read_csv("https://data.ecoforecast.org/targets/ticks/ticks-targets.csv.gz", guess_max = 1e6)
+
+# site data
+site_data <- readr::read_csv("https://raw.githubusercontent.com/eco4cast/neon4cast-ticks/master/Ticks_NEON_Field_Site_Metadata_20210928.csv")
+```
+
+
+EDA
+```{r}
+ggplot(amblyomma, aes(x = time, y = amblyomma_americanum)) +
+  geom_point() +
+  facet_wrap(~siteID, scale = "free_y") +
+  theme_bw() +
+  labs(y = "Density", x = "Time") 
+
+
+ggplot(amblyomma, aes(x = mmwrWeek, y = amblyomma_americanum)) +
+  geom_point() +
+  facet_wrap(~siteID) +
+  theme_bw() +
+  labs(y = "Density", x = "Week")
+
+
+hist(amblyomma$amblyomma_americanum)
+```
+
+### Prepare data for code
+
+```{r}
+
+time = as.Date(amblyomma$time)
+y = (amblyomma$amblyomma_americanum)
+
+amblyomma <- amblyomma[amblyomma$amblyomma_americanum != 0.0,]
+
+
+  filter(amblyomma_americanum != 0.0)
+time = as.Date(amblyomma$time)
+
+```
+
+
+### JAGS code
+```{r}
+RandomWalk = "
+model{
+  
+  #### Data Model
+  for(t in 1:n){
+    y[t] ~ dnorm(x[t],tau_obs)
+  }
+  
+  #### Process Model
+  for(t in 2:n){
+    x[t]~ dnorm(x[t-1],tau_add)
+  }
+  
+  #### Priors
+  x[1] ~ dnorm(x_ic,tau_ic) # initial conditions
+  tau_obs ~ dgamma(a_obs,r_obs)
+  tau_add ~ dgamma(a_add,r_add)
+}
+"
+```
+
+
+### Define data and priors
+
+```{r}
+data <- list(y=log(y),n=length(y),      ## data
+             x_ic=log(1000),tau_ic=100, ## initial condition prior
+             a_obs=1,r_obs=1,           ## obs error prior
+             a_add=1,r_add=1            ## process error prior
+             )
+
+```
+
+### Initialize MCMC
+```{r}
+nchain = 3
+init <- list()
+for(i in 1:nchain){
+  y.samp = sample(y,length(y),replace=TRUE)
+  init[[i]] <- list(tau_add=1/var(diff(log(y.samp))),  ## initial guess on process precision
+                    tau_obs=5/var(log(y.samp)))        ## initial guess on obs precision
+}
+
+
+```
+
+### Run JAGS
+
+```{r}
+j.model   <- jags.model (file = textConnection(RandomWalk),
+                             data = data,
+                             inits = init,
+                             n.chains = 3)
+
+```
+
+### Check convergence
+
+```{r}
+## burn-in
+jags.out   <- coda.samples (model = j.model,
+                            variable.names = c("tau_add","tau_obs"),
+                                n.iter = 1000)
+plot(jags.out)
+```
+### Plot it
+
+~~ need to fix the ci line which then fixes the plot issue ~~
+
+```{r}
+time.rng = c(1,length(time))       ## adjust to zoom in and out
+out <- as.matrix(jags.out)         ## convert from coda to matrix  
+x.cols <- grep("",colnames(out)) ## grab all columns that start with the letter x
+ci <- apply(exp(out[,x.cols]),2,quantile,c(0.025,0.5,0.975)) ## model was fit on log scale ## x.cols
+
+plot(time,ci[2,],type='n',ylim=range(y,na.rm=TRUE),ylab="Amblyomma Index",log='y',xlim=time[time.rng])
+## adjust x-axis label to be monthly if zoomed
+if(diff(time.rng) < 100){ 
+  axis.Date(1, at=seq(time[time.rng[1]],time[time.rng[2]],by='month'), format = "%Y-%m")
+}
+ecoforecastR::ciEnvelope(time,ci[1,],ci[3,],col=ecoforecastR::col.alpha("lightBlue",0.75))
+points(time,y,pch="+",cex=0.5)
+```
+
