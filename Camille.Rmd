@@ -40,5 +40,76 @@ ggplot2::ggplot(data = ticks, mapping = aes(x = mmwrWeek, y = amblyomma_american
   theme_bw() +
   theme(axis.text = element_text(size = 14),
         axis.title = element_text(size = 18))
+
+konz <- ticks |> dplyr::filter(siteID == "KONZ")
+
+tick.rf <- randomForest(amblyomma_americanum ~ ., data = konz[1:30,], importance = TRUE,
+                        proximity = TRUE)
+
+konz$pred <- predict(tick.rf, konz)
+
+ggplot(data = konz, aes(x = time, y = amblyomma_americanum)) +
+  geom_point() +
+  geom_line(data = konz[1:30,], aes(x = time, y = pred)) +
+  geom_line(data = konz[30:nrow(konz),], aes(x = time, y = pred), color = "red")
 ```
+
+```{r}
+library(rjags)
+library(coda)
+
+RandomWalk = "
+model{
+  
+  #### Data Model
+  for(t in 1:n){
+    y[t] ~ dnorm(x[t],tau_obs)
+  }
+  
+  #### Process Model
+  for(t in 2:n){
+    x[t] ~ dnorm(x[t-1],tau_add)
+  }
+  
+  #### Priors
+  x[1] ~ dnorm(x_ic,tau_ic)
+  tau_obs ~ dgamma(a_obs,r_obs)
+  tau_add ~ dgamma(a_add,r_add)
+}
+"
+
+attach(ticks)
+
+data <- list(y=log(amblyomma_americanum + 0.001),n = length(amblyomma_americanum),      ## data
+             x_ic=log(1000),tau_ic=100, ## initial condition prior
+             a_obs=1,r_obs=1,           ## obs error prior
+             a_add=1,r_add=1            ## process error prior
+             )
+
+j.model   <- jags.model(file = textConnection(RandomWalk),
+                        data = data,
+                        n.chains = 3)
+
+## burn-in
+jags.out   <- coda.samples (model = j.model,
+                            variable.names = c("tau_add","tau_obs"),
+                            n.iter = 10000)
+plot(jags.out)
+
+gelman.diag(jags.out)
+
+BGR <- gelman.plot(jags.out)
+```
+
+
+```{r}
+daymet <- readr::read_csv("daymetChallengeSites.csv")
+
+ggplot(data = daymet, mapping = aes(x = Date, y = maxTemperature)) +
+  geom_point()
+```
+
+
+
+
 
