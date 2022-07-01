@@ -461,7 +461,7 @@ model{
   #### Data Model
   for(t in 1:n){
     for (site in 1:n_site){
-        y[t,site] ~ dnorm(x[t,site],tau_obs)
+        y[t,site] ~ dnorm(x[t,site],tau_obs[site])
 
     }
   }
@@ -474,9 +474,11 @@ model{
   #### Priors
   for(site in 1:n_site){
     x[1,site] ~ dnorm(x_ic,tau_ic)
+    
+    tau_obs[site] ~ dgamma(a_obs,r_obs)
+    tau_add[site] ~ dgamma(a_add,r_add)
   }
-  tau_obs ~ dgamma(a_obs,r_obs)
-  tau_add ~ dgamma(a_add,r_add)
+
   Omega_proc ~ dwish(R,n_site)
   
 }
@@ -495,15 +497,12 @@ data_groups_standardized <- list(y=as.matrix(ticks_standardized_matrix),     ## 
                                             ncol = ncol(ticks_standardized_matrix))
 )
 
-library(MCMCpack)
 diag(data_groups_standardized$R) <- dgamma(data_groups_standardized$a_obs, data_groups_standardized$r_obs)
 
 
 ## d. build JAGS framework ----------------------------------------------------
 
 nchain = 3
-
-
 
 ## e. run model ---------------------------------------------------------------
 
@@ -525,7 +524,7 @@ gelman.diag(jags.out_groups_standardized)
 
 # run again extracting x variables
 jags.out_groups_standardized   <- coda.samples (model = j.model_groups_standardized,
-                                                variable.names = c("tau_add","tau_obs","x"),
+                                                variable.names = c("tau_add","tau_obs","x", "R"),
                                                 n.iter = 10000)
 
 
@@ -557,7 +556,7 @@ tidy_out_groups_standardized_edited <- tidy_out_groups_standardized_edited %>%
   group_by(site_num) %>%
   tidyr::nest() %>%
   ungroup() %>%
-  mutate(site_name = colnames(ticks_standardized_matrix[1])) %>%
+  mutate(site_name = colnames(ticks_standardized_matrix)) %>%
   tidyr::unnest(data)
 
 # plot group ribbons just to see
@@ -609,3 +608,133 @@ tidy_out_groups_standardized_edited_merged %>%
   labs()+
   theme(legend.position = "none")
 
+
+## log transform data
+Y   = log10(y)[,1:(ncol(y)-2)]
+
+## options for process model 
+alpha = 0        ## assume no spatial flux
+#alpha = 0.05    ## assume a large spatial flux
+M = adj*alpha + diag(1-alpha*apply(adj,1,sum))  ## random walk with flux
+
+## options for process error covariance
+#Q = tau_proc            ## full process error covariance matrix
+Q = diag(diag(tau_proc))        ## diagonal process error matrix
+
+## observation error covariance (assumed independent)  
+R = diag(tau_obs,nstates) 
+
+## prior on first step, initialize with long-term mean and covariance
+mu0 = apply(Y,1,mean,na.rm=TRUE)
+P0 = cov(t(Y),use="pairwise.complete.obs")
+#w <- P0*0+0.25 + diag(0.75,dim(P0)) ## iptional: downweight covariances in IC
+#P0 = P0*w 
+
+## Run Kalman Filter
+KF00 = KalmanFilter(M,mu0,P0,Q,R,Y)
+
+
+##'  Daily Forecast
+##' @param  M   = model matrix
+##' @param  mu0 = initial condition mean vector
+##' @param  P0  = initial condition covariance matrix
+##' @param  Q   = process error covariance matrix
+##' @param  R   = observation error covariance matrix
+##' @param  Y   = observation matrix (with missing values as NAs), time as col's
+##'
+##' @return list
+##'  mu.f, mu.a  = state mean vector for (a)nalysis and (f)orecast steps
+##'  P.f, P.a    = state covariance matrix for a and f
+#'@param Fx <forecast> Previous forecast object
+#'@param D <list> New data for that day
+#'@param nsteps <integer> number of time steps ahead to forecast
+DailyForecast <- function(Fx,D,nsteps,M,Q,R,Y){
+  
+  ## storage
+  nstates = nrow(Y)  
+  nt = ncol(Y)
+  
+  mu.f  = matrix(NA,nstates,nt+1+nsteps)  ## forecast mean for time t
+  mu.a  = matrix(NA,nstates,nt+nsteps)    ## analysis mean for time t
+  P.f  = array(NA,c(nstates,nstates,nt+1+nsteps))  ## forecast variance for time t
+  P.a  = array(NA,c(nstates,nstates,nt+nsteps))    ## analysis variance for time t
+  
+  ## initialization
+  mu.f[,1:nt] = Fx$mu.f
+  mu.a[,1:(nt-1)] = Fx$mu.a
+  P.f[,,1:nt] = Fx$P.f
+  P.a[,,1:(nt-1)] = Fx$P.a
+  I = diag(1,nstates)
+  
+  ## Analysis step: combine previous forecast with observed data
+  KA <- KalmanAnalysis(mu.f[,nt],P.f[,,nt],D,R,H=I,I)
+  mu.a[,nt] <- KA$mu.a
+  P.a[,,nt] <- KA$P.a
+  
+  KF <- KalmanForecast(mu.a[,nt],P.a[,,nt],M,Q)
+  mu.f[,nt + 1] <- KF$mu.f
+  P.f[,,nt + 1] <- KF$P.f
+  
+  ## run updates sequentially for each observation.
+  for(t in 1:nsteps){
+    ## Analysis step: combine previous forecast with observed data
+    KA <- KalmanAnalysis(mu.f[,nt + t],P.f[,,nt + t],mu.f[,nt + t - 1],R,H=I,I)
+    mu.a[,nt+t] <- KA$mu.a
+    P.a[,,nt+t] <- KA$P.a
+    
+    KF <- KalmanForecast(mu.a[,nt+t],P.a[,,nt+t],M,Q)
+    mu.f[,(nt+1+t)] <- KF$mu.f
+    P.f[,,(nt+1+t)] <- KF$P.f
+  }
+  
+  return(list(mu.f=mu.f, mu.a=mu.a, P.f=P.f, P.a=P.a))
+}
+
+Y = log10(y)[,1:(ncol(y)-1)]
+D = log10(y)[,(ncol(y))]
+
+## Run Kalman Forecast for 16 time steps ahead
+DF00 = DailyForecast(Fx = KF00,
+                     D = D,
+                     nsteps = 16,
+                     M = M,
+                     Q = Q,
+                     R = R,
+                     Y = Y)
+
+
+time = as.Date(gflu$Date)
+time = c(time, seq.Date(time[length(time)], length.out = nsteps, by = "1 week"))
+nt = length(time)
+
+## subset time
+time2 <- time[time>as.Date("2015-01-01")]
+tsel <- which(time %in% time2)
+
+## plot Forecast, Analysis, and data
+plot(time2,DF00$mu.f[1,tsel],type='l')
+lines(time2,DF00$mu.f[1,tsel],lwd=2)
+points(as.Date(gflu$Date),log10(y)[1,])
+abline(v = time[620], col = "black")
+
+
+## subset time
+time2 <- time[time>as.Date("2015-01-01")]
+tsel <- which(time %in% time2)
+n = length(time2)*2
+
+## interleave Forecast and Analysis
+mu = p = rep(NA,n)
+mu[seq(1,n,by=2)] = DF00$mu.f[1,tsel]
+mu[seq(2,n,by=2)] = DF00$mu.a[1,tsel-1]
+p[seq(1,n,by=2)]  = 1.96*sqrt(DF00$P.f[1,1,tsel])
+p[seq(2,n,by=2)]  = 1.96*sqrt(DF00$P.a[1,1,tsel-1])
+ci = cbind(mu-p,mu+p)
+time3 = sort(c(time2,time2+1))
+
+## plot Forecast, Analysis, and data
+plot(time3,mu,ylim=range(ci),type='l')
+ecoforecastR::ciEnvelope(time3,ci[,1],ci[,2],col="lightBlue")
+lines(time3,mu,lwd=2)
+points(as.Date(gflu$Date),log10(y)[1,])
+abline(v = time[620], col = "black")
