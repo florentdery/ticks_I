@@ -121,9 +121,9 @@ ticks_standardized_matrix_extended <- ticks_standardized_extended %>%
   select(-year_month, 
          -month,
          -year,
-         -timestep) %>%
+         -timestep)# %>%
   # replace all zeros with NAs
-  mutate_all(~replace(., . == 0, NA))
+ # mutate_all(~replace(., . == 0, NA))
 
 
 

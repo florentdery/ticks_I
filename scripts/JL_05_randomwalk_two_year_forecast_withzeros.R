@@ -1,20 +1,12 @@
 
 # --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- 
-# project from 2021 to 2022  ----------------------------------
+# project from 2020 to 2022  ----------------------------------
 # --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- 
 
 # in this script, we'll use real tick data up to december 2020 to project
 # tick densities up to december 2022 using a random walk model. 
 # our assumption is that uncertainties will be very large in 2022,
 # which later we will shrink with 2021 real data
-
-library(dplyr)
-library(ggplot2)
-library(rjags)
-#remotes::install_github("njtierney/mmcc")
-library(mmcc) # this package helps to tidy-verse-ify coda outputs
-
-
 
 
 ticks <- readr::read_csv("https://data.ecoforecast.org/targets/ticks/ticks-targets.csv.gz", guess_max = 1e6)
@@ -67,7 +59,18 @@ ticks_standardized <- ticks %>%
   ungroup() %>%
   relocate(timestep)
 
-rm(ticks, site_data)
+
+
+# remove the last few years of points 
+# (change to NA in all sites after timestep 85, 
+# which is Jan 2021
+ticks_standardized %>% glimpse()
+ticks_standardized_trimmed <- ticks_standardized %>%
+  # change every value past december 2020 to NA
+  mutate(across(BLAN:UKFS, 
+                ~  case_when(year_month > "2020-12" ~ as.double(NA),
+                             TRUE ~ .))) 
+
 
 # make a blank df for 2022 that we will bind to the dataframe above
 blank_2022 <- 
@@ -86,15 +89,16 @@ blank_2022 <-
          "TALL" = as.numeric(NA),
          "UKFS" = as.numeric(NA),
          timestep = NA
-  )
+         )
 
 
 
 ticks_standardized_extended <- 
-  ticks_standardized %>%
+  ticks_standardized_trimmed %>%
   rbind(blank_2022) %>%
   mutate(timestep = 1:n())
 
+rm(ticks_standardized_trimmed)
 
 ticks_standardized_extended %>% glimpse()
 
@@ -117,9 +121,9 @@ ticks_standardized_matrix_extended <- ticks_standardized_extended %>%
   select(-year_month, 
          -month,
          -year,
-         -timestep) %>%
+         -timestep)# %>%
   # replace all zeros with NAs
-  mutate_all(~replace(., . == 0, NA))
+ # mutate_all(~replace(., . == 0, NA))
 
 
 
@@ -156,12 +160,12 @@ model{
 
 ## c. make dataset ------------------------------------------------------------
 data_groups_standardized_extended <- list(y=as.matrix(ticks_standardized_matrix_extended),     ## data in a matrix 
-                                          n_site=ncol(ticks_standardized_matrix_extended),     ## number of sites
-                                          #n_site = 2,
-                                          n = nrow(ticks_standardized_matrix_extended),        ## number of times (58)
-                                          x_ic=100,tau_ic=.001,        ## initial condition prior
-                                          a_obs=.005,r_obs=.005,           ## obs error prior
-                                          a_add=.005,r_add=.05            ## process error prior
+                                         n_site=ncol(ticks_standardized_matrix_extended),     ## number of sites
+                                         #n_site = 2,
+                                         n = nrow(ticks_standardized_matrix_extended),        ## number of times (58)
+                                         x_ic=100,tau_ic=.001,        ## initial condition prior
+                                         a_obs=.005,r_obs=.005,           ## obs error prior
+                                         a_add=.005,r_add=.05            ## process error prior
 )
 
 
@@ -176,14 +180,14 @@ nchain = 3
 
 
 j.model_groups_standardized_extended   <- jags.model (file = textConnection(RandomWalk_grouped_standardized),
-                                                      data = data_groups_standardized_extended,
-                                                      n.chains = 3)
+                                                     data = data_groups_standardized_extended,
+                                                     n.chains = 3)
 
 
 
 jags.out_groups_standardized_extended   <- coda.samples (model = j.model_groups_standardized_extended,
-                                                         variable.names = c("tau_add","tau_obs"),
-                                                         n.iter = 10000)
+                                                        variable.names = c("tau_add","tau_obs"),
+                                                        n.iter = 10000)
 plot(jags.out_groups_standardized_extended)
 # ok, these don't look so good
 gelman.diag(jags.out_groups_standardized_extended)
@@ -192,8 +196,8 @@ gelman.diag(jags.out_groups_standardized_extended)
 
 # run again extracting x variables
 jags.out_groups_standardized_extended   <- coda.samples (model = j.model_groups_standardized_extended,
-                                                         variable.names = c("tau_add","tau_obs","x"),
-                                                         n.iter = 30000)
+                                                        variable.names = c("tau_add","tau_obs","x"),
+                                                        n.iter = 30000)
 
 
 
@@ -243,9 +247,9 @@ ticks_standardized_matrix_full <- ticks_standardized %>%
   select(-year_month, 
          -month,
          -year,
-         -timestep) %>%
+         -timestep) #%>%
   # replace all zeros with NAs
-  mutate_all(~replace(., . == 0, NA))
+ # mutate_all(~replace(., . == 0, NA))
 
 
 tidy_out_groups_standardized_edited_merged_extended <- 
@@ -286,16 +290,22 @@ forecast_vis <- tidy_out_groups_standardized_edited_merged_extended %>%
              scales = "free_y") +
   ggthemes::theme_few()+
   # add in non-forecasted points (which the model was fit on)
-  geom_point(aes(x=date, y=tick_density), 
+  geom_point(data = . %>% filter(forecast == "no"),
+             aes(x=date, y=tick_density), 
              shape = 21,
              size=1.5, alpha=.75,
              stroke = .4)+
-  geom_vline(xintercept = as.Date("2022-01-01"),
+  geom_vline(xintercept = as.Date("2021-01-01"),
              linetype = "dashed") +
   # add in forecasted points (after Jan 2021)
+  geom_point(data = . %>% filter(forecast == "yes"),
+             aes(x=date, y=tick_density), 
+             shape = 8,
+             size=1.5, alpha=.5,
+             stroke = .4)+
   # add a shaded box to show forecasts
   geom_rect(inherit.aes=F,
-            aes(xmin = as.Date("2022-01-01"),
+            aes(xmin = as.Date("2021-01-01"),
                 xmax = as.Date(Inf),
                 ymin = -Inf,
                 ymax = Inf),
@@ -304,21 +314,24 @@ forecast_vis <- tidy_out_groups_standardized_edited_merged_extended %>%
             alpha = .1) +
   labs(y = "Model Prediction",
        x = "Date",
-       title ="Tick density one-year forecast",
-       subtitle = "Random walk models using values through Dec 2021 projecting to Dec 2022")+
+       title ="Tick density 2-year forecast - with zeros",
+       subtitle = "Random walk models using values through Dec 2020 projecting to Dec 2022")+
   theme(legend.position = "none",
         plot.title.position = "plot",
         plot.title = element_text(face = "bold"))
 
+
 forecast_vis
 
 ggsave(
-  here::here("plots","ticks_one_year_forecast.png"),
+  here::here("plots","ticks_two_year_forecast_withzeros.png"),
   forecast_vis,
   dpi = 300,
   height = 8,
   width = 6,
   units = "in"
 )
+
+
 
 

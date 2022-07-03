@@ -33,10 +33,10 @@ site_temps_monthly <- site_temps %>%
   # find monthly values
   group_by(site_id, month, year) %>%
   summarize(
-    monthly_max_temp = max(max_temperature),
-    mean_max_temp = mean(max_temperature),
-    mean_precip = mean(precipitation),
-    total_precip = sum(precipitation)
+    monthly_max_temp = max(max_temperature,na.rm = T),
+    mean_max_temp = mean(max_temperature,na.rm=T),
+    mean_precip = mean(precipitation,na.rm=T),
+    total_precip = sum(precipitation,na.rm = T)
   ) %>%
   ungroup() %>%
   
@@ -89,17 +89,17 @@ ticks_standardized <- ticks %>%
 
 ticks_standardized_w_temps <- 
   ticks_standardized %>%
-  left_join(site_temps_monthly)
+  left_join(site_temps_monthly) %>%
+  select(
+    -mean_precip, 
+    -mean_max_temp,
+    -total_precip
+  ) %>%
+  # since temp only go through 2020, cut toto values
+  filter(year< 2021)
+
 
 # plot tick densities against counts, just to see
-
-ticks_standardized_w_temps %>%
-  mutate(amblyomma_americanum = case_when(amblyomma_americanum == 0 ~ as.numeric(NA),
-                                          TRUE ~ amblyomma_americanum)) %>%
-  ggplot(aes(x=mean_max_temp, y = amblyomma_americanum, color = siteID)) +
-  geom_point()+
-  ggthemes::theme_few()
-
 ticks_standardized_w_temps %>%
   ggplot(aes(x=monthly_max_temp, y = amblyomma_americanum, color = siteID)) +
   geom_point()+
@@ -107,7 +107,8 @@ ticks_standardized_w_temps %>%
 
 
 
-ticks_standardized_w_temps %>%
+ticks_matrix <- ticks_standardized_w_temps %>%
+  select(-monthly_max_temp) %>%
   # pivot to a matrix of sites by year_month
   tidyr::pivot_wider(names_from = siteID,
                      values_from = amblyomma_americanum)  %>%
@@ -122,38 +123,36 @@ ticks_standardized_w_temps %>%
   ungroup() %>%
   relocate(timestep)
 
+temp_matrix <- ticks_standardized_w_temps %>%
+  select(-amblyomma_americanum) %>%
+  # pivot to a matrix of sites by year_month
+  tidyr::pivot_wider(names_from = siteID,
+                     values_from = monthly_max_temp)  %>%
+  arrange(year_month) %>%
+  
+  
+  # add a numeric timestep based on year_month column
+  group_by(year_month) %>%
+  tidyr::nest() %>%
+  ungroup() %>%
+  mutate(timestep = c(1:n())) %>%
+  tidyr::unnest(data) %>%
+  ungroup() %>%
+  relocate(timestep)
 
 
 
 
 
-# remove the last few years of points 
-# (change to NA in all sites after timestep 85, 
-# which is Jan 2021
+ticks_matrix <- ticks_matrix %>%
+  select(-year_month, 
+         -month,
+         -year,
+         -timestep) %>%
+  # replace all zeros with NAs
+  mutate_all(~replace(., . == 0, NA))
 
-ticks_standardized_trimmed <- ticks_standardized %>%
-  mutate(across(BLAN:UKFS, 
-                ~  case_when(timestep > 85 ~ as.double(NA),
-                             TRUE ~ .)))
-
-
-
-# plot the standardized dataset
-ticks_standardized_trimmed %>%
-  mutate(date = as.Date(paste0(year_month,"-01"))) %>%
-  tidyr::pivot_longer(cols = c("BLAN":"UKFS"),
-                      names_to = "siteID",
-                      values_to = "tick_density") %>%
-  tidyr::drop_na(tick_density) %>%
-  ggplot(aes(x=date,
-             y = tick_density,
-             group = siteID,
-             color = siteID)) +
-  geom_point() +
-  geom_path()
-
-
-ticks_standardized_matrix_trimmed <- ticks_standardized_trimmed %>%
+temp_matrix <- temp_matrix %>%
   select(-year_month, 
          -month,
          -year,
@@ -165,7 +164,7 @@ ticks_standardized_matrix_trimmed <- ticks_standardized_trimmed %>%
 
 ## b. build JAGS model ------------------------------------------------------
 
-RandomWalk_grouped_month_effect= "
+RandomWalk_grouped_temp <-  "
 model{
   
   #### Data Model
@@ -178,7 +177,10 @@ model{
   #### Process Model
   for(t in 2:n){
     for(site in 1:n_site){
-      x[t,site]~dnorm(x[t-1,site],tau_add[site])
+      x[t,site]~dnorm(mu[t,site],tau_add[site])
+      mu[t,site] <- m[t,site] * x[t-1,site]
+      m[t,site] <- beta0 + beta.temp * temp[t,site]
+
     }
   }
   
@@ -188,17 +190,21 @@ model{
     
     tau_obs[site] ~ dgamma(a_obs,r_obs)
     tau_add[site] ~ dgamma(a_add,r_add)
-
+  
   }
+    beta0 ~ dnorm(0,.001)
+    beta.temp ~ dnorm(0,.001)
+
 }
 "
 
 
 ## c. make dataset ------------------------------------------------------------
-data_groups_standardized_trimmed <- list(y=as.matrix(ticks_standardized_matrix_trimmed),     ## data in a matrix 
-                                         n_site=ncol(ticks_standardized_matrix_trimmed),     ## number of sites
+data_groups_standardized_trimmed <- list(y=as.matrix(ticks_matrix),  
+                                         temp = as.matrix(temp_matrix),
+                                         n_site=ncol(ticks_matrix),     ## number of sites
                                          #n_site = 2,
-                                         n = nrow(ticks_standardized_matrix_trimmed),        ## number of times (58)
+                                         n = nrow(ticks_matrix),        ## number of times (58)
                                          x_ic=100,tau_ic=.001,        ## initial condition prior
                                          a_obs=.005,r_obs=.005,           ## obs error prior
                                          a_add=.005,r_add=.05            ## process error prior
@@ -215,7 +221,7 @@ nchain = 3
 ## e. run model ---------------------------------------------------------------
 
 
-j.model_groups_standardized_trimmed   <- jags.model (file = textConnection(RandomWalk_grouped_standardized),
+j.model_groups_standardized_trimmed   <- jags.model (file = textConnection(RandomWalk_grouped_temp),
                                                      data = data_groups_standardized_trimmed,
                                                      n.chains = 3)
 
@@ -224,18 +230,22 @@ j.model_groups_standardized_trimmed   <- jags.model (file = textConnection(Rando
 jags.out_groups_standardized_trimmed   <- coda.samples (model = j.model_groups_standardized_trimmed,
                                                         variable.names = c("tau_add","tau_obs"),
                                                         n.iter = 10000)
-plot(jags.out_groups_standardized_trimmed)
+plot(jags.out_groups_standardized_trimmed[[1]])
 # ok, these don't look so good
 gelman.diag(jags.out_groups_standardized_trimmed)
-
 
 
 # run again extracting x variables
 jags.out_groups_standardized_trimmed   <- coda.samples (model = j.model_groups_standardized_trimmed,
                                                         variable.names = c("tau_add","tau_obs","x"),
+                                                        n.iter = 10000)
+
+# run again extracting beta variables
+jags.out_betas   <- coda.samples (model = j.model_groups_standardized_trimmed,
+                                                        variable.names = c("beta0","beta.temp"),
                                                         n.iter = 30000)
-
-
+plot(jags.out_betas)
+summary(jags.out_betas)
 
 ## f. tidy and visualize ------------------------------------------------------
 
@@ -278,11 +288,11 @@ tidy_out_groups_standardized_edited_trimmed %>%
 
 
 # add in real data from the untrimmed dataset
-ticks_standardized_matrix_full <- ticks_standardized %>%
+ticks_standardized_matrix_full <- ticks_standardized_w_temps %>%
   select(-year_month, 
          -month,
          -year,
-         -timestep) %>%
+         -monthly_max_temp) %>%
   # replace all zeros with NAs
   mutate_all(~replace(., . == 0, NA))
 
@@ -291,32 +301,30 @@ tidy_out_groups_standardized_edited_merged_trimmed <-
   tidy_out_groups_standardized_edited_trimmed  %>%
   left_join(
     # join back to original dataset with real values
-    ticks_standardized_matrix_full %>% 
-      mutate(timestep = row_number())%>%
-      tidyr::pivot_longer(cols = -timestep,
-                          names_to = "site_name",
-                          values_to = "tick_density") %>%
-      mutate(forecast = case_when(timestep >= 85 ~ "yes",
-                                  TRUE ~ "no"))
+    ticks_standardized_matrix_full %>% group_by(siteID) %>%
+      mutate(timestep = row_number()) %>%
+      rename(site_name = siteID)
   )
 
+tidy_out_groups_standardized_edited_merged_trimmed %>% distinct(site_name)
 
 # add in original dates
 tidy_out_groups_standardized_edited_merged_trimmed <- tidy_out_groups_standardized_edited_merged_trimmed %>%
   group_by(timestep) %>%
   tidyr::nest() %>%
   ungroup() %>%
-  mutate(date = as.Date(paste0(ticks_standardized_trimmed$year_month,"-01")))%>%
+  mutate(date = as.Date(paste0(ticks_matrix_full$year_month,"-01")))%>%
   relocate(date) %>%
   tidyr::unnest(data)
 
+tidy_out_groups_standardized_edited_merged_trimmed %>% distinct(site_name)
 
 
 ## g. plot and save ----------------------------------------------------
 
 # now plot with real values
 forecast_vis <- tidy_out_groups_standardized_edited_merged_trimmed %>% 
-  ggplot(aes(x=date, y = mean, group = site_num, fill = site_num)) +
+  ggplot(aes(x=date, y = mean, group = site_num, fill = site_name)) +
   geom_hline(yintercept = 0, linetype = "dashed", size = .15) +
   geom_ribbon(aes(ymin = `2.5%`, ymax = `97.5%`), alpha=.5)+
   geom_line(size=.15) +
@@ -324,28 +332,28 @@ forecast_vis <- tidy_out_groups_standardized_edited_merged_trimmed %>%
              scales = "free_y") +
   ggthemes::theme_few()+
   # add in non-forecasted points (which the model was fit on)
-  geom_point(data = . %>% filter(forecast == "no"),
-             aes(x=date, y=tick_density), 
+  geom_point(#data = . %>% filter(forecast == "no"),
+             aes(x=date, y=amblyomma_americanum), 
              shape = 21,
              size=1.5, alpha=.75,
              stroke = .4)+
   geom_vline(xintercept = as.Date("2021-01-01"),
              linetype = "dashed") +
   # add in forecasted points (after Jan 2021)
-  geom_point(data = . %>% filter(forecast == "yes"),
-             aes(x=date, y=tick_density), 
-             shape = 8,
-             size=1.5, alpha=.5,
-             stroke = .4)+
+ #geom_point(data = . %>% filter(forecast == "yes"),
+ #           aes(x=date, y=tick_density), 
+ #           shape = 8,
+ #           size=1.5, alpha=.5,
+ #           stroke = .4)+
   # add a shaded box to show forecasts
-  geom_rect(inherit.aes=F,
-            aes(xmin = as.Date("2021-01-01"),
-                xmax = as.Date(Inf),
-                ymin = -Inf,
-                ymax = Inf),
-            stat = "unique",
-            fill = "grey10",
-            alpha = .1) +
+ # geom_rect(inherit.aes=F,
+ #           aes(xmin = as.Date("2021-01-01"),
+ #               xmax = as.Date(Inf),
+ #               ymin = -Inf,
+ #               ymax = Inf),
+ #           stat = "unique",
+ #           fill = "grey10",
+ #           alpha = .1) +
   labs(y = "Model Prediction",
        x = "Date",
        title ="Tick density predictions across 9 sites",
@@ -353,6 +361,8 @@ forecast_vis <- tidy_out_groups_standardized_edited_merged_trimmed %>%
   theme(legend.position = "none",
         plot.title.position = "plot")
 
+
+forecast_vis
 
 ggsave(
   here::here("plots","grouped_forecast_plot.png"),
